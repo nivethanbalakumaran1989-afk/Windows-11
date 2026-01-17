@@ -19,19 +19,14 @@ jobs:
         run: |
           $User = "runneradmin"
           $Pass = "EnigMano2026!"
-          
           if (Get-LocalUser -Name $User -ErrorAction SilentlyContinue) {
-              Write-Host "⚠️ User $User exists. Updating password..."
               $Password = ConvertTo-SecureString $Pass -AsPlainText -Force
               Set-LocalUser -Name $User -Password $Password
           } else {
-              Write-Host "🆕 Creating new user $User..."
               New-LocalUser -Name $User -Password (ConvertTo-SecureString $Pass -AsPlainText -Force) -FullName "Runner Admin"
           }
-
           if (-not (Get-LocalGroupMember -Group "Administrators" -Member $User -ErrorAction SilentlyContinue)) {
               Add-LocalGroupMember -Group "Administrators" -Member $User
-              Write-Host "➕ Added $User to Administrators."
           }
 
       - name: 🏗️ Install ZeroTier
@@ -39,35 +34,45 @@ jobs:
         run: |
           $url = "https://download.zerotier.com/dist/ZeroTier%20One.msi"
           $outpath = "$env:TEMP\ZeroTier.msi"
-          
           Write-Host "📥 Downloading ZeroTier..."
           Invoke-WebRequest -Uri $url -OutFile $outpath
           
-          Write-Host "⚙️ Installing ZeroTier..."
-          # Removed /norestart to allow the driver to initialize properly if needed
+          Write-Host "⚙️ Installing ZeroTier (this may take a minute)..."
           $process = Start-Process msiexec.exe -ArgumentList "/i `"$outpath`" /quiet /qn" -Wait -PassThru
-          if ($process.ExitCode -ne 0) { throw "MSI Installation failed with exit code $($process.ExitCode)" }
+          
+          # Give the system a few seconds to register the new files and start the service
+          Start-Sleep -Seconds 10
 
       - name: 🌐 Connect to Virtual Network
         shell: pwsh
         run: |
           $networkId = "${{ github.event.inputs.ZEROTIER_NETWORK_ID }}"
           
-          # Search for the executable in common locations (Program Files vs Program Files (x86))
+          # We search for both 'zerotier-cli.exe' (the tool) and 'zerotier-one_x64.exe'
+          # We check both Program Files and Program Files (x86)
           $possiblePaths = @(
-              "${env:ProgramFiles}\ZeroTier\One\zerotier-one_x64.exe",
-              "${env:ProgramFiles(x86)}\ZeroTier\One\zerotier-one_x64.exe"
+              "${env:ProgramFiles(x86)}\ZeroTier\One\zerotier-cli.exe",
+              "${env:ProgramFiles}\ZeroTier\One\zerotier-cli.exe",
+              "${env:ProgramFiles(x86)}\ZeroTier\One\zerotier-one_x64.exe",
+              "${env:ProgramFiles}\ZeroTier\One\zerotier-one_x64.exe"
           )
           
           $zt_path = $possiblePaths | Where-Object { Test-Path $_ } | Select-Object -First 1
 
           if ($zt_path) {
-              Write-Host "✅ Found ZeroTier at: $zt_path"
-              & $zt_path -q join $networkId
+              Write-Host "✅ Found ZeroTier executable at: $zt_path"
+              # Use 'join' via the CLI
+              & $zt_path join $networkId
               Write-Host "📡 Sent join request for $networkId"
           } else {
-              Write-Error "❌ ZeroTier executable not found in expected directories!"
-              exit 1
+              Write-Host "❌ Still not found. Attempting deep search..."
+              $deepSearch = Get-ChildItem -Path "C:\Program Files*" -Filter "zerotier-cli.exe" -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1
+              if ($deepSearch) {
+                  & $deepSearch.FullName join $networkId
+              } else {
+                  Write-Error "❌ ZeroTier CLI not found anywhere on the system. Check installation logs."
+                  exit 1
+              }
           }
 
       - name: 🖥️ Configure Remote Desktop (RDP)
@@ -76,12 +81,11 @@ jobs:
           Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name "fDenyTSConnections" -Value 0
           Enable-NetFirewallRule -DisplayGroup "Remote Desktop" -ErrorAction SilentlyContinue
           Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name "UserAuthentication" -Value 1
-          Write-Host "✅ RDP configuration applied."
 
       - name: ⏳ Maintenance Loop (Keep Alive)
         shell: pwsh
         run: |
-          Write-Host "🚀 Instance is LIVE. Connect via ZeroTier IP."
+          Write-Host "🚀 Instance is LIVE."
           for ($i=1; $i -le 360; $i++) {
             Write-Host "Heartbeat: ($i/360 mins)"
             Start-Sleep -Seconds 60
