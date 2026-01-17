@@ -6,71 +6,68 @@ on:
       ZEROTIER_NETWORK_ID:
         description: "Your 16-digit ZeroTier Network ID"
         required: true
-        default: ""
 
 jobs:
   deploy-arm-rdp:
     name: "🚀 Deploy ARM RDP via ZeroTier"
-    # Keeping your specific runner label
     runs-on: windows-11-arm
     timeout-minutes: 360
 
     steps:
-      - name: 🔐 Set Local Credentials
+      - name: 🔐 Configure Local Credentials
         shell: pwsh
         run: |
           $User = "runneradmin"
           $Pass = "EnigMano2026!"
-          net user $User $Pass /add
-          net localgroup administrators $User /add
-          Write-Host "✅ Account $User created with tactical precision."
+          
+          # Check if the user already exists
+          $UserExists = net user | Select-String -Pattern $User
+          
+          if ($UserExists) {
+            Write-Host "⚠️ User $User already exists. Resetting password..."
+            net user $User $Pass
+          } else {
+            Write-Host "🆕 Creating new user $User..."
+            net user $User $Pass /add
+          }
+          
+          # Ensure user is in administrators group (suppress error if already a member)
+          net localgroup administrators $User /add 2>$null
+          
+          Write-Host "✅ Account $User is ready for tactical deployment."
 
-      - name: 🏗️ Install ZeroTier (ARM Emulation/Native)
+      - name: 🏗️ Install ZeroTier
         shell: pwsh
         run: |
           $url = "https://download.zerotier.com/dist/ZeroTier%20One.msi"
           $outpath = "$env:TEMP\ZeroTier.msi"
-          Write-Host "📥 Downloading ZeroTier..."
-          Invoke-WebRequest -Uri $url -OutFile $outpath
-          Write-Host "⚙️ Installing ZeroTier..."
+          if (!(Test-Path $outpath)) {
+            Invoke-WebRequest -Uri $url -OutFile $outpath
+          }
           Start-Process msiexec.exe -ArgumentList "/i $outpath /quiet /qn /norestart" -Wait
-          Write-Host "✅ ZeroTier installation sequence complete."
+          Write-Host "✅ ZeroTier Installed"
 
       - name: 🌐 Connect to Virtual Network
         shell: pwsh
         run: |
-          # Give the service a moment to initialize
           Start-Sleep -Seconds 15
           $networkId = "${{ github.event.inputs.ZEROTIER_NETWORK_ID }}"
-          
-          # Use the absolute path for the ZeroTier CLI
-          $zt_cli = "C:\Program Files (x86)\ZeroTier\One\zerotier-one_x64.exe"
-          & $zt_cli -q join $networkId
-          
-          Write-Host "📡 Join request sent for: $networkId"
-          Write-Host "👉 ACTION REQUIRED: Go to https://my.zerotier.com/ and AUTHORIZE this device."
+          & "C:\Program Files (x86)\ZeroTier\One\zerotier-one_x64.exe" -q join $networkId
+          Write-Host "📡 Network Join Request Sent. Go authorize it on your dashboard!"
 
       - name: 🖥️ Configure Remote Desktop (RDP)
         shell: pwsh
         run: |
-          Write-Host "🔓 Enabling RDP and Firewall rules..."
           Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name "fDenyTSConnections" -Value 0
           Enable-NetFirewallRule -DisplayGroup "Remote Desktop"
           Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name "UserAuthentication" -Value 1
-          Write-Host "✅ RDP is now listening."
+          Write-Host "✅ RDP Port Open."
 
       - name: ⏳ Maintenance Loop (Keep Alive)
         shell: pwsh
         run: |
-          Write-Host "==============================================="
-          Write-Host "🚀 DEPLOYMENT SUCCESSFUL"
-          Write-Host "👤 User: runneradmin"
-          Write-Host "🔑 Pass: EnigMano2026!"
-          Write-Host "==============================================="
-          
-          # Keeping the session alive for the maximum duration
+          Write-Host "🚀 RDP Session Started"
           for ($i=1; $i -le 360; $i++) {
-            $time = Get-Date -Format "HH:mm:ss"
-            Write-Host "[$time] Instance Active - Heartbeat $i/360"
+            Write-Host "Heartbeat: Instance is online ($i/360 mins)"
             Start-Sleep -Seconds 60
           }
