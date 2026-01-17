@@ -1,92 +1,52 @@
-name: "⚡ EnigMano ZeroTier ARM Deployment"
-
-on:
-  workflow_dispatch:
-    inputs:
-      ZEROTIER_NETWORK_ID:
-        description: "Your 16-digit ZeroTier Network ID"
-        required: true
-
-jobs:
-  deploy-arm-rdp:
-    name: "🚀 Deploy ARM RDP via ZeroTier"
-    runs-on: windows-11-arm
-    timeout-minutes: 360
-
-    steps:
-      - name: 🔐 Configure Local Credentials
-        shell: pwsh
-        run: |
-          $User = "runneradmin"
-          $Pass = "EnigMano2026!"
-          if (Get-LocalUser -Name $User -ErrorAction SilentlyContinue) {
-              $Password = ConvertTo-SecureString $Pass -AsPlainText -Force
-              Set-LocalUser -Name $User -Password $Password
-          } else {
-              New-LocalUser -Name $User -Password (ConvertTo-SecureString $Pass -AsPlainText -Force) -FullName "Runner Admin"
-          }
-          if (-not (Get-LocalGroupMember -Group "Administrators" -Member $User -ErrorAction SilentlyContinue)) {
-              Add-LocalGroupMember -Group "Administrators" -Member $User
-          }
-
-      - name: 🏗️ Install ZeroTier
+- name: 🏗️ Install ZeroTier
         shell: pwsh
         run: |
           $url = "https://download.zerotier.com/dist/ZeroTier%20One.msi"
           $outpath = "$env:TEMP\ZeroTier.msi"
+          $logpath = "$env:TEMP\zt_install.log"
+          
           Write-Host "📥 Downloading ZeroTier..."
           Invoke-WebRequest -Uri $url -OutFile $outpath
           
-          Write-Host "⚙️ Installing ZeroTier (this may take a minute)..."
-          $process = Start-Process msiexec.exe -ArgumentList "/i `"$outpath`" /quiet /qn" -Wait -PassThru
+          Write-Host "⚙️ Installing ZeroTier (Logging to $logpath)..."
+          # Added logging (/L*V) to help diagnose if the install fails
+          $process = Start-Process msiexec.exe -ArgumentList "/i `"$outpath`" /quiet /qn /L*V `"$logpath`"" -Wait -PassThru
           
-          # Give the system a few seconds to register the new files and start the service
-          Start-Sleep -Seconds 10
+          if ($process.ExitCode -ne 0) {
+              Write-Host "❌ Installation failed. Content of log:"
+              Get-Content $logpath -Tail 20
+              exit 1
+          }
+          Start-Sleep -Seconds 15
 
       - name: 🌐 Connect to Virtual Network
         shell: pwsh
         run: |
           $networkId = "${{ github.event.inputs.ZEROTIER_NETWORK_ID }}"
           
-          # We search for both 'zerotier-cli.exe' (the tool) and 'zerotier-one_x64.exe'
-          # We check both Program Files and Program Files (x86)
-          $possiblePaths = @(
-              "${env:ProgramFiles(x86)}\ZeroTier\One\zerotier-cli.exe",
-              "${env:ProgramFiles}\ZeroTier\One\zerotier-cli.exe",
-              "${env:ProgramFiles(x86)}\ZeroTier\One\zerotier-one_x64.exe",
-              "${env:ProgramFiles}\ZeroTier\One\zerotier-one_x64.exe"
-          )
-          
-          $zt_path = $possiblePaths | Where-Object { Test-Path $_ } | Select-Object -First 1
+          # Refresh environment variables so the runner sees the new installation path
+          $env:Path = [System.Environment]::GetEnvironmentVariable("Path","Machine") + ";" + [System.Environment]::GetEnvironmentVariable("Path","User")
 
-          if ($zt_path) {
-              Write-Host "✅ Found ZeroTier executable at: $zt_path"
-              # Use 'join' via the CLI
-              & $zt_path join $networkId
-              Write-Host "📡 Sent join request for $networkId"
-          } else {
-              Write-Host "❌ Still not found. Attempting deep search..."
-              $deepSearch = Get-ChildItem -Path "C:\Program Files*" -Filter "zerotier-cli.exe" -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1
-              if ($deepSearch) {
-                  & $deepSearch.FullName join $networkId
-              } else {
-                  Write-Error "❌ ZeroTier CLI not found anywhere on the system. Check installation logs."
-                  exit 1
-              }
+          # Try to find the CLI tool quickly using 'where' or standard paths
+          $zt_cli = where.exe zerotier-cli 2>$null | Select-Object -First 1
+          if (-not $zt_cli) {
+              $paths = @(
+                  "${env:ProgramFiles}\ZeroTier\One\zerotier-cli.exe",
+                  "${env:ProgramFiles(x86)}\ZeroTier\One\zerotier-cli.exe",
+                  "C:\ProgramData\ZeroTier\One\zerotier-one.exe"
+              )
+              $zt_cli = $paths | Where-Object { Test-Path $_ } | Select-Object -First 1
           }
 
-      - name: 🖥️ Configure Remote Desktop (RDP)
-        shell: pwsh
-        run: |
-          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name "fDenyTSConnections" -Value 0
-          Enable-NetFirewallRule -DisplayGroup "Remote Desktop" -ErrorAction SilentlyContinue
-          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name "UserAuthentication" -Value 1
-
-      - name: ⏳ Maintenance Loop (Keep Alive)
-        shell: pwsh
-        run: |
-          Write-Host "🚀 Instance is LIVE."
-          for ($i=1; $i -le 360; $i++) {
-            Write-Host "Heartbeat: ($i/360 mins)"
-            Start-Sleep -Seconds 60
+          if ($zt_cli) {
+              Write-Host "✅ Found ZeroTier at: $zt_cli"
+              & $zt_cli join $networkId
+              
+              # Wait for the service to actually get an IP
+              Write-Host "⏳ Waiting for network assignment..."
+              Start-Sleep -Seconds 10
+              & $zt_cli listnetworks
+          } else {
+              Write-Error "❌ ZeroTier CLI not found. The MSI may have failed to extract files on this ARM runner."
+              exit 1
           }
