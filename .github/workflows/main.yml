@@ -20,7 +20,6 @@ jobs:
           $User = "runneradmin"
           $Pass = "EnigMano2026!"
           
-          # Use native PowerShell cmdlets to avoid "net" command exit code errors
           if (Get-LocalUser -Name $User -ErrorAction SilentlyContinue) {
               Write-Host "⚠️ User $User exists. Updating password..."
               $Password = ConvertTo-SecureString $Pass -AsPlainText -Force
@@ -30,16 +29,10 @@ jobs:
               New-LocalUser -Name $User -Password (ConvertTo-SecureString $Pass -AsPlainText -Force) -FullName "Runner Admin"
           }
 
-          # Check if user is already an admin before trying to add
           if (-not (Get-LocalGroupMember -Group "Administrators" -Member $User -ErrorAction SilentlyContinue)) {
               Add-LocalGroupMember -Group "Administrators" -Member $User
               Write-Host "➕ Added $User to Administrators."
-          } else {
-              Write-Host "✅ $User is already an Administrator."
           }
-          
-          $LASTEXITCODE = 0
-          exit 0
 
       - name: 🏗️ Install ZeroTier
         shell: pwsh
@@ -47,42 +40,43 @@ jobs:
           $url = "https://download.zerotier.com/dist/ZeroTier%20One.msi"
           $outpath = "$env:TEMP\ZeroTier.msi"
           
-          if (!(Test-Path $outpath)) {
-              Invoke-WebRequest -Uri $url -OutFile $outpath
-          }
+          Write-Host "📥 Downloading ZeroTier..."
+          Invoke-WebRequest -Uri $url -OutFile $outpath
           
-          Write-Host "⚙️ Installing/Repairing ZeroTier..."
-          # Start-Process with -Wait ensures it finishes before moving on
-          Start-Process msiexec.exe -ArgumentList "/i $outpath /quiet /qn /norestart" -Wait
-          $LASTEXITCODE = 0
-          exit 0
+          Write-Host "⚙️ Installing ZeroTier..."
+          # Removed /norestart to allow the driver to initialize properly if needed
+          $process = Start-Process msiexec.exe -ArgumentList "/i `"$outpath`" /quiet /qn" -Wait -PassThru
+          if ($process.ExitCode -ne 0) { throw "MSI Installation failed with exit code $($process.ExitCode)" }
 
       - name: 🌐 Connect to Virtual Network
         shell: pwsh
         run: |
           $networkId = "${{ github.event.inputs.ZEROTIER_NETWORK_ID }}"
-          $zt_path = "C:\Program Files (x86)\ZeroTier\One\zerotier-one_x64.exe"
           
-          if (Test-Path $zt_path) {
+          # Search for the executable in common locations (Program Files vs Program Files (x86))
+          $possiblePaths = @(
+              "${env:ProgramFiles}\ZeroTier\One\zerotier-one_x64.exe",
+              "${env:ProgramFiles(x86)}\ZeroTier\One\zerotier-one_x64.exe"
+          )
+          
+          $zt_path = $possiblePaths | Where-Object { Test-Path $_ } | Select-Object -First 1
+
+          if ($zt_path) {
+              Write-Host "✅ Found ZeroTier at: $zt_path"
               & $zt_path -q join $networkId
               Write-Host "📡 Sent join request for $networkId"
           } else {
-              Write-Error "❌ ZeroTier executable not found!"
+              Write-Error "❌ ZeroTier executable not found in expected directories!"
               exit 1
           }
-          $LASTEXITCODE = 0
-          exit 0
 
       - name: 🖥️ Configure Remote Desktop (RDP)
         shell: pwsh
         run: |
-          # Enable RDP and ignore errors if already enabled
-          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name "fDenyTSConnections" -Value 0 -ErrorAction SilentlyContinue
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name "fDenyTSConnections" -Value 0
           Enable-NetFirewallRule -DisplayGroup "Remote Desktop" -ErrorAction SilentlyContinue
-          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name "UserAuthentication" -Value 1 -ErrorAction SilentlyContinue
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name "UserAuthentication" -Value 1
           Write-Host "✅ RDP configuration applied."
-          $LASTEXITCODE = 0
-          exit 0
 
       - name: ⏳ Maintenance Loop (Keep Alive)
         shell: pwsh
