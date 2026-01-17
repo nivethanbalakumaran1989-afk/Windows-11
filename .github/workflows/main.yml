@@ -33,11 +33,10 @@ jobs:
         run: |
           $url = "https://download.zerotier.com/dist/ZeroTier%20One.msi"
           $outpath = "$env:TEMP\ZeroTier.msi"
-          Write-Host "📥 Downloading MSI..."
           Invoke-WebRequest -Uri $url -OutFile $outpath
-          Write-Host "⚙️ Installing ZeroTier..."
+          # Standard silent install
           Start-Process msiexec.exe -ArgumentList "/i `"$outpath`" /quiet /qn" -Wait
-          # Essential sleep for the service to initialize on ARM
+          # Allow time for ARM network drivers to register
           Start-Sleep -Seconds 30
 
       - name: 🌐 Connect to Virtual Network
@@ -45,27 +44,26 @@ jobs:
         run: |
           $networkId = "${{ github.event.inputs.ZEROTIER_NETWORK_ID }}"
           
-          # This list covers every possible install location for ZeroTier on x64 and ARM
+          # ARM64 usually puts it in ProgramData or Program Files (x86)
           $possiblePaths = @(
-            "C:\Program Files\ZeroTier\One\zerotier-cli.exe",
-            "C:\Program Files (x86)\ZeroTier\One\zerotier-cli.exe",
             "C:\ProgramData\ZeroTier\One\zerotier-one.exe",
-            "$env:ProgramFiles\ZeroTier\One\zerotier-one.exe"
+            "C:\Program Files (x86)\ZeroTier\One\zerotier-cli.bat",
+            "C:\Program Files\ZeroTier\One\zerotier-cli.exe"
           )
           
           $zt_bin = $possiblePaths | Where-Object { Test-Path $_ } | Select-Object -First 1
 
           if ($zt_bin) {
-            Write-Host "✅ Found ZeroTier at: $zt_bin"
-            # Attempt join using the found binary
+            Write-Host "✅ Found: $zt_bin"
             if ($zt_bin -like "*zerotier-one.exe*") {
+                # Use service binary with -q join flag
                 & $zt_bin -q join $networkId
             } else {
+                # Use standard CLI
                 & $zt_bin join $networkId
             }
-            Write-Host "📡 Network join request sent."
           } else {
-            Write-Error "❌ Fatal: Could not locate ZeroTier binaries after installation."
+            Write-Error "❌ Fatal: ZeroTier binaries not found. Check install logs."
             exit 1
           }
 
@@ -76,10 +74,10 @@ jobs:
           Enable-NetFirewallRule -DisplayGroup "Remote Desktop" -ErrorAction SilentlyContinue
           Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name "UserAuthentication" -Value 1
 
-      - name: ⏳ Maintenance Loop
+      - name: ⏳ Keep Alive Loop
         shell: pwsh
         run: |
-          Write-Host "🚀 Instance is LIVE. Authorize the member in your ZeroTier dashboard!"
+          Write-Host "🚀 Instance is LIVE. Authorize your node in ZeroTier Central."
           while($true) {
             Write-Host "Heartbeat: $(Get-Date)"
             Start-Sleep -Seconds 60
