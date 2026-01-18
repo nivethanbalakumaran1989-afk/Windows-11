@@ -1,84 +1,114 @@
-name: "⚡ EnigMano ZeroTier ARM Deployment"
+name: RDP
 
 on:
   workflow_dispatch:
-    inputs:
-      ZEROTIER_NETWORK_ID:
-        description: "Your 16-digit ZeroTier Network ID"
-        required: true
 
 jobs:
-  deploy-arm-rdp:
-    name: "🚀 Deploy ARM RDP via ZeroTier"
-    runs-on: windows-11-arm
-    timeout-minutes: 360
+  secure-rdp:
+    runs-on: windows-latest
+    timeout-minutes: 3600
 
     steps:
-      - name: 🔐 Configure Local Credentials
-        shell: pwsh
+      - name: Configure Core RDP Settings
         run: |
-          $User = "runneradmin"
-          $Pass = "EnigMano2026!"
-          if (Get-LocalUser -Name $User -ErrorAction SilentlyContinue) {
-            Set-LocalUser -Name $User -Password (ConvertTo-SecureString $Pass -AsPlainText -Force)
-          } else {
-            New-LocalUser -Name $User -Password (ConvertTo-SecureString $Pass -AsPlainText -Force) -FullName "Runner Admin"
-          }
-          if (-not (Get-LocalGroupMember -Group "Administrators" -Member $User -ErrorAction SilentlyContinue)) {
-            Add-LocalGroupMember -Group "Administrators" -Member $User
-          }
+          # Enable Remote Desktop and disable Network Level Authentication (if needed)
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' `
+                             -Name "fDenyTSConnections" -Value 0 -Force
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' `
+                             -Name "UserAuthentication" -Value 0 -Force
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' `
+                             -Name "SecurityLayer" -Value 0 -Force
 
-      - name: 🏗️ Install ZeroTier
-        shell: pwsh
-        run: |
-          $url = "https://download.zerotier.com/dist/ZeroTier%20One.msi"
-          $outpath = "$env:TEMP\ZeroTier.msi"
-          Invoke-WebRequest -Uri $url -OutFile $outpath
-          # Standard silent install
-          Start-Process msiexec.exe -ArgumentList "/i `"$outpath`" /quiet /qn" -Wait
-          # Allow time for ARM network drivers to register
-          Start-Sleep -Seconds 30
-
-      - name: 🌐 Connect to Virtual Network
-        shell: pwsh
-        run: |
-          $networkId = "${{ github.event.inputs.ZEROTIER_NETWORK_ID }}"
+          # Remove any existing rule with the same name to avoid duplication
+          netsh advfirewall firewall delete rule name="RDP-Tailscale"
           
-          # ARM64 usually puts it in ProgramData or Program Files (x86)
-          $possiblePaths = @(
-            "C:\ProgramData\ZeroTier\One\zerotier-one.exe",
-            "C:\Program Files (x86)\ZeroTier\One\zerotier-cli.bat",
-            "C:\Program Files\ZeroTier\One\zerotier-cli.exe"
-          )
+          # For testing, allow any incoming connection on port 3389
+          netsh advfirewall firewall add rule name="RDP-Tailscale" `
+            dir=in action=allow protocol=TCP localport=3389
+
+          # (Optional) Restart the Remote Desktop service to ensure changes take effect
+          Restart-Service -Name TermService -Force
+
+      - name: Create RDP User with Secure Password
+        run: |
+          Add-Type -AssemblyName System.Security
+          $charSet = @{
+              Upper   = [char[]](65..90)      # A-Z
+              Lower   = [char[]](97..122)     # a-z
+              Number  = [char[]](48..57)      # 0-9
+              Special = ([char[]](33..47) + [char[]](58..64) +
+                         [char[]](91..96) + [char[]](123..126)) # Special characters
+          }
+          $rawPassword = @()
+          $rawPassword += $charSet.Upper | Get-Random -Count 4
+          $rawPassword += $charSet.Lower | Get-Random -Count 4
+          $rawPassword += $charSet.Number | Get-Random -Count 4
+          $rawPassword += $charSet.Special | Get-Random -Count 4
+          $password = -join ($rawPassword | Sort-Object { Get-Random })
+          $securePass = ConvertTo-SecureString $password -AsPlainText -Force
+          New-LocalUser -Name "RDP" -Password $securePass -AccountNeverExpires
+          Add-LocalGroupMember -Group "Administrators" -Member "RDP"
+          Add-LocalGroupMember -Group "Remote Desktop Users" -Member "RDP"
           
-          $zt_bin = $possiblePaths | Where-Object { Test-Path $_ } | Select-Object -First 1
-
-          if ($zt_bin) {
-            Write-Host "✅ Found: $zt_bin"
-            if ($zt_bin -like "*zerotier-one.exe*") {
-                # Use service binary with -q join flag
-                & $zt_bin -q join $networkId
-            } else {
-                # Use standard CLI
-                & $zt_bin join $networkId
-            }
-          } else {
-            Write-Error "❌ Fatal: ZeroTier binaries not found. Check install logs."
-            exit 1
+          echo "RDP_CREDS=User: RDP | Password: $password" >> $env:GITHUB_ENV
+          
+          if (-not (Get-LocalUser -Name "RDP")) {
+              Write-Error "User creation failed"
+              exit 1
           }
 
-      - name: 🖥️ Configure Remote Desktop (RDP)
-        shell: pwsh
+      - name: Install Tailscale
         run: |
-          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name "fDenyTSConnections" -Value 0
-          Enable-NetFirewallRule -DisplayGroup "Remote Desktop" -ErrorAction SilentlyContinue
-          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name "UserAuthentication" -Value 1
+          $tsUrl = "https://pkgs.tailscale.com/stable/tailscale-setup-1.82.0-amd64.msi"
+          $installerPath = "$env:TEMP\tailscale.msi"
+          
+          Invoke-WebRequest -Uri $tsUrl -OutFile $installerPath
+          Start-Process msiexec.exe -ArgumentList "/i", "`"$installerPath`"", "/quiet", "/norestart" -Wait
+          Remove-Item $installerPath -Force
 
-      - name: ⏳ Keep Alive Loop
-        shell: pwsh
+      - name: Establish Tailscale Connection
         run: |
-          Write-Host "🚀 Instance is LIVE. Authorize your node in ZeroTier Central."
-          while($true) {
-            Write-Host "Heartbeat: $(Get-Date)"
-            Start-Sleep -Seconds 60
+          # Bring up Tailscale with the provided auth key and set a unique hostname
+          & "$env:ProgramFiles\Tailscale\tailscale.exe" up --authkey=${{ secrets.TAILSCALE_AUTH_KEY }} --hostname=gh-runner-$env:GITHUB_RUN_ID
+          
+          # Wait for Tailscale to assign an IP
+          $tsIP = $null
+          $retries = 0
+          while (-not $tsIP -and $retries -lt 10) {
+              $tsIP = & "$env:ProgramFiles\Tailscale\tailscale.exe" ip -4
+              Start-Sleep -Seconds 5
+              $retries++
           }
+          
+          if (-not $tsIP) {
+              Write-Error "Tailscale IP not assigned. Exiting."
+              exit 1
+          }
+          echo "TAILSCALE_IP=$tsIP" >> $env:GITHUB_ENV
+      
+      - name: Verify RDP Accessibility
+        run: |
+          Write-Host "Tailscale IP: $env:TAILSCALE_IP"
+          
+          # Test connectivity using Test-NetConnection against the Tailscale IP on port 3389
+          $testResult = Test-NetConnection -ComputerName $env:TAILSCALE_IP -Port 3389
+          if (-not $testResult.TcpTestSucceeded) {
+              Write-Error "TCP connection to RDP port 3389 failed"
+              exit 1
+          }
+          Write-Host "TCP connectivity successful!"
+
+      - name: Maintain Connection
+        run: |
+          Write-Host "`n=== RDP ACCESS ==="
+          Write-Host "Address: $env:TAILSCALE_IP"
+          Write-Host "Username: RDP"
+          Write-Host "Password: $(echo $env:RDP_CREDS)"
+          Write-Host "==================`n"
+          
+          # Keep runner active indefinitely (or until manually cancelled)
+          while ($true) {
+              Write-Host "[$(Get-Date)] RDP Active - Use Ctrl+C in workflow to terminate"
+              Start-Sleep -Seconds 300
+          }
+
